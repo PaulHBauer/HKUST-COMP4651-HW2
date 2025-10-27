@@ -1,5 +1,6 @@
 package hk.ust.comp4651;
 
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.util.Random;
 
@@ -91,7 +92,14 @@ public class HomeWork_2 {
      *  - Idempotent: re-running does nothing harmful.
      */
     public static void delEmptyFilesRecursive(Path root) throws IOException {
-    
+        FileSystem fs = HDFSUtils.getFileSystem();
+        Path sandbox = new Path(fs.getHomeDirectory(), "hw2");
+
+        // Only operate inside the sandbox, return when given root is not in sandbox (idempotent & safe)
+        if (!isUnder(fs, root, sandbox)) {
+            return;
+        }
+        deleteEmptyRecursive(fs, root, sandbox);
     }
 
     /**
@@ -103,7 +111,74 @@ public class HomeWork_2 {
      *  - Idempotent and robust.
      */
     public static void delBySuffixRecursive(Path root, String suffix) throws IOException {
+        if (suffix == null || suffix.isEmpty()) return;
 
+        FileSystem fs = HDFSUtils.getFileSystem();
+        Path sandbox = new Path(fs.getHomeDirectory(), "hw2");
+
+        // Only operate inside the sandbox, return when given root is not in sandbox (idempotent & safe)
+        if (!isUnder(fs, root, sandbox)) {
+            return;
+        }
+        deleteBySuffixRecursive(fs, root, sandbox, suffix);
+    }
+
+    // Deletes empty files, works recursively
+    private static void deleteEmptyRecursive(FileSystem fs, Path p, Path sandbox) throws IOException {
+        FileStatus status;
+        try {
+            status = fs.getFileStatus(p);
+        } catch (FileNotFoundException e) {
+            // File already deleted, method terminates without errors anyway —> idempotent
+            return;
+        }
+
+        if (status.isDirectory()) {
+            // Recursively move into directory
+            FileStatus[] children = fs.listStatus(p);
+            if (children != null) {
+                for (FileStatus child : children) {
+                    deleteEmptyRecursive(fs, child.getPath(), sandbox);
+                }
+            }
+        } else if (status.isFile()) {
+            // Delete only empty files within sandbox
+            if (status.getLen() == 0 && isUnder(fs, p, sandbox)) {
+                fs.delete(p, false);
+            }
+        }
+    }
+
+    // Deletes files ending with a specified suffix, works recursively
+    private static void deleteBySuffixRecursive(FileSystem fs, Path p, Path sandbox, String suffix) throws IOException {
+        FileStatus status;
+        try {
+            status = fs.getFileStatus(p);
+        } catch (FileNotFoundException e) {
+            return;
+        }
+
+        if (status.isDirectory()) {
+            FileStatus[] children = fs.listStatus(p);
+            if (children != null) {
+                for (FileStatus child : children) {
+                    deleteBySuffixRecursive(fs, child.getPath(), sandbox, suffix);
+                }
+            }
+        } else if (status.isFile()) {
+            final String name = p.getName();
+            if (name.endsWith(suffix) && isUnder(fs, p, sandbox)) {
+                fs.delete(p, false);
+            }
+        }
+    }
+
+    // Check if given path is under allowed root
+    private static boolean isUnder(FileSystem fs, Path pathToCheck, Path allowedRoot) {
+        String path = pathToCheck.makeQualified(fs.getUri(), fs.getWorkingDirectory()).toString();
+        String root = allowedRoot.makeQualified(fs.getUri(), fs.getWorkingDirectory()).toString();
+
+        return path.equals(root) || path.startsWith(root);
     }
 
     /**
