@@ -14,10 +14,7 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.conf.Configured;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.io.FloatWritable;
-import org.apache.hadoop.io.IntWritable;
-import org.apache.hadoop.io.LongWritable;
-import org.apache.hadoop.io.Text;
+import org.apache.hadoop.io.*;
 import org.apache.hadoop.mapreduce.Job;
 import org.apache.hadoop.mapreduce.Mapper;
 import org.apache.hadoop.mapreduce.Partitioner;
@@ -47,12 +44,27 @@ public class BigramFrequencyPairs extends Configured implements Tool {
 		@Override
 		public void map(LongWritable key, Text value, Context context)
 				throws IOException, InterruptedException {
-			String line = ((Text) value).toString();
+			String line = value.toString();
 			String[] words = line.trim().split("\\s+");
 			
 			/*
 			 * TODO: Your implementation goes here.
 			 */
+			if (words.length > 1) {
+				for (int i = 0; i+1 < words.length; i++) {
+					String currWord = words[i];
+					String nextWord = words[i+1];
+					if (currWord.isEmpty()) {
+						continue;
+					}
+
+					BIGRAM.set(currWord, nextWord);
+					context.write(BIGRAM, ONE);
+
+					BIGRAM.set(currWord, "*");
+					context.write(BIGRAM, ONE);
+				}
+			}
 		}
 	}
 
@@ -63,7 +75,9 @@ public class BigramFrequencyPairs extends Configured implements Tool {
 			Reducer<PairOfStrings, IntWritable, PairOfStrings, FloatWritable> {
 
 		// Reuse objects.
-		private final static FloatWritable VALUE = new FloatWritable();
+		private final static FloatWritable RELATIVE_FREQUENCY = new FloatWritable();
+		private final static LongWritable MARGINAL = new LongWritable();
+		private String currentWord = null;
 
 		@Override
 		public void reduce(PairOfStrings key, Iterable<IntWritable> values,
@@ -71,6 +85,30 @@ public class BigramFrequencyPairs extends Configured implements Tool {
 			/*
 			 * TODO: Your implementation goes here.
 			 */
+
+			if (currentWord == null || key.getLeftElement().equals(currentWord)) {
+				currentWord = key.getRightElement();
+				MARGINAL.set(0L);
+			}
+
+			long sum = 0L;
+			for (IntWritable val : values) {
+				sum += val.get();
+			}
+
+			if (key.getRightElement().equals("*")) {
+				// Store marginal for this word
+				MARGINAL.set(sum);
+				context.write(new PairOfStrings(key.getLeftElement(), ""), new FloatWritable(sum));
+			} else {
+				if (MARGINAL.get() == 0L) {
+					System.out.println("ERROR, no marginal found meaning some entries are in order before '*' which should not happen!");
+					return;
+				}
+				float relativeFrequency = (float) ((double) sum / (double) MARGINAL.get());
+				RELATIVE_FREQUENCY.set(relativeFrequency);
+				context.write(key, RELATIVE_FREQUENCY);
+			}
 		}
 	}
 	
@@ -84,6 +122,12 @@ public class BigramFrequencyPairs extends Configured implements Tool {
 			/*
 			 * TODO: Your implementation goes here.
 			 */
+			int sum = 0;
+			for (IntWritable val : values) {
+				sum += val.get();
+			}
+			SUM.set(sum);
+			context.write(key, SUM);
 		}
 	}
 
@@ -97,6 +141,41 @@ public class BigramFrequencyPairs extends Configured implements Tool {
 				int numReduceTasks) {
 			return (key.getLeftElement().hashCode() & Integer.MAX_VALUE)
 					% numReduceTasks;
+		}
+	}
+
+	public static class StarFirstComparator extends WritableComparator {
+		private static final Text.Comparator TEXT_COMPARATOR = new Text.Comparator();
+
+		public StarFirstComparator() {
+			super(PairOfStrings.class);
+		}
+
+		@Override
+		public int compare(byte[] b1, int s1, int l1, byte[] b2, int s2, int l2) {
+			try {
+				int firstL1 = WritableUtils.decodeVIntSize(b1[s1]) + readVInt(b1, s1);
+				int firstL2 = WritableUtils.decodeVIntSize(b2[s2]) + readVInt(b2, s2);
+
+				// compare left
+				int cmp = TEXT_COMPARATOR.compare(b1, s1, firstL1, b2, s2, firstL2);
+				if (cmp != 0) return cmp;
+
+				// when same left, compare right. Enforces "*" to come first
+				int r1s = s1 + firstL1, r1l = l1 - firstL1;
+				int r2s = s2 + firstL2, r2l = l2 - firstL2;
+
+				// check if right == "*"
+				boolean s1star = (r1l == 2 && b1[r1s] == 1 && b1[r1s + 1] == (byte) '*');
+				boolean s2star = (r2l == 2 && b2[r2s] == 1 && b2[r2s + 1] == (byte) '*');
+
+				if (s1star && !s2star) return -1;
+				if (!s1star && s2star) return 1;
+
+				return TEXT_COMPARATOR.compare(b1, r1s, r1l, b2, r2s, r2l);
+			} catch (IOException e) {
+				throw new IllegalArgumentException(e);
+			}
 		}
 	}
 
@@ -177,6 +256,7 @@ public class BigramFrequencyPairs extends Configured implements Tool {
 		 */
 		job.setMapperClass(MyMapper.class);
 		job.setCombinerClass(MyCombiner.class);
+		job.setSortComparatorClass(StarFirstComparator.class);
 		job.setPartitionerClass(MyPartitioner.class);
 		job.setReducerClass(MyReducer.class);
 
